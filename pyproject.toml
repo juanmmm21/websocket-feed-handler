@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "websocket-feed-handler"
+version = "0.1.0"
+description = "Cliente WebSocket de alta velocidad con reconexión automática para feeds de exchanges."
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "juanmmm21" }]
+dependencies = [
+    "websockets>=12.0,<16",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/websocket_feed_handler"]
