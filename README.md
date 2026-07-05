@@ -1,71 +1,71 @@
 # websocket-feed-handler
 
-Cliente WebSocket de alta velocidad con reconexión automática para recibir **trades en tiempo real** desde exchanges de criptomonedas. Es el **primer módulo** del ecosistema [quant-core-infra](https://github.com/juanmmm21/quant-core-infra) y actúa como capa de ingesta: todo lo que ocurre después (libro de órdenes, lakehouse, señales, backtest) depende de los ticks normalizados que emite este proyecto.
+High-speed WebSocket client with automatic reconnection for receiving **real-time trades** from cryptocurrency exchanges. It's the **first module** of the [quant-core-infra](https://github.com/juanmmm21/quant-core-infra) ecosystem and acts as the ingestion layer: everything that happens downstream (order book, lakehouse, signals, backtest) depends on the normalized ticks this project emits.
 
-Repositorio: [github.com/juanmmm21/websocket-feed-handler](https://github.com/juanmmm21/websocket-feed-handler)
-
----
-
-## Qué es y qué problema resuelve
-
-Los exchanges publican trades en formatos JSON distintos, con campos, precisiones y convenciones de símbolo propietarias. Construir lógica de trading directamente sobre esos payloads acopla el sistema a un proveedor concreto y hace imposible cambiar de exchange sin reescribir código.
-
-Este módulo resuelve ese problema con un **adaptador por exchange** que traduce mensajes crudos a un único tipo de dominio: `TradeEvent`. El cliente WebSocket se encarga de la conexión persistente, la reconexión con backoff y el parseo en caliente; el resto del ecosistema solo ve eventos normalizados.
+Repository: [github.com/juanmmm21/websocket-feed-handler](https://github.com/juanmmm21/websocket-feed-handler)
 
 ---
 
-## Rol en quant-core-infra
+## What it is and what problem it solves
+
+Exchanges publish trades in different JSON formats, with proprietary fields, precision, and symbol conventions. Building trading logic directly on top of those payloads couples the system to a specific provider and makes it impossible to switch exchanges without rewriting code.
+
+This module solves that problem with a **per-exchange adapter** that translates raw messages into a single domain type: `TradeEvent`. The WebSocket client handles the persistent connection, backoff reconnection, and hot-path parsing; the rest of the ecosystem only ever sees normalized events.
+
+---
+
+## Role in quant-core-infra
 
 ```text
 [Binance / Coinbase WebSocket]
             │
             ▼
-   websocket-feed-handler  ◄── estás aquí (ingesta de trades)
+   websocket-feed-handler  ◄── you are here (trade ingestion)
             │
-            ├──► order-book-reconstructor  (profundidad L2, otro canal WS)
-            ├──► market-data-lakehouse     (agregación OHLCV + Parquet)
-            └──► event-driven-backtester   (replay histórico desde JSONL)
+            ├──► order-book-reconstructor  (L2 depth, separate WS channel)
+            ├──► market-data-lakehouse     (OHLCV aggregation + Parquet)
+            └──► event-driven-backtester   (historical replay from JSONL)
 ```
 
-Es la **fuente de verdad en tiempo real** para precios y volumen ejecutado. No persiste datos por sí mismo: delega el almacenamiento a `market-data-lakehouse` o a consumidores propios.
+It's the **real-time source of truth** for executed price and volume. It doesn't persist data itself: storage is delegated to `market-data-lakehouse` or to its own consumers.
 
 ---
 
-## Objetivo
+## Purpose
 
-Este proyecto demuestra dominio de:
+This project demonstrates proficiency in:
 
-- Programación asíncrona avanzada (`asyncio` + `websockets`)
-- Conexiones persistentes con tolerancia a fallos
-- Parseo estructurado de mensajes JSON en el hot path
-- Diseño desacoplado mediante adapters e interfaces (`Protocol`)
-
----
-
-## Cómo funciona (ciclo de vida)
-
-1. **Configuración:** se define exchange, símbolos y política de reconexión en `FeedConfig`.
-2. **Conexión:** `ResilientWebSocketFeed` abre el WebSocket usando la URL y mensajes de suscripción del adapter.
-3. **Recepción:** cada mensaje JSON pasa por el parser del exchange (`TradeMessageParser`).
-4. **Normalización:** el parser devuelve un `TradeEvent` o `None` si el mensaje no es un trade.
-5. **Entrega:** el callback `on_trade` recibe el evento tipado con `Decimal` en precio y cantidad.
-6. **Fallo de red:** se registra el error, se cierra la conexión y se programa reconexión con backoff exponencial + jitter.
-7. **Parada limpia:** `await feed.stop()` o `SIGINT`/`SIGTERM` en la CLI terminan el bucle sin dejar sockets huérfanos.
+- Advanced asynchronous programming (`asyncio` + `websockets`)
+- Fault-tolerant persistent connections
+- Structured JSON message parsing on the hot path
+- Decoupled design via adapters and interfaces (`Protocol`)
 
 ---
 
-## Exchanges soportados
+## How it works (lifecycle)
 
-| Exchange | Stream / Canal | URL base | Formato de símbolo |
+1. **Configuration:** exchange, symbols, and reconnection policy are defined in `FeedConfig`.
+2. **Connection:** `ResilientWebSocketFeed` opens the WebSocket using the adapter's URL and subscription messages.
+3. **Reception:** each JSON message goes through the exchange's parser (`TradeMessageParser`).
+4. **Normalization:** the parser returns a `TradeEvent`, or `None` if the message isn't a trade.
+5. **Delivery:** the `on_trade` callback receives the typed event, with price and quantity as `Decimal`.
+6. **Network failure:** the error is logged, the connection is closed, and reconnection is scheduled with exponential backoff + jitter.
+7. **Clean shutdown:** `await feed.stop()` or `SIGINT`/`SIGTERM` in the CLI end the loop without leaving orphaned sockets.
+
+---
+
+## Supported exchanges
+
+| Exchange | Stream / Channel | Base URL | Symbol format |
 |----------|----------------|----------|--------------------|
 | **Binance** | `<symbol>@trade` | `wss://stream.binance.com:9443` | `BTCUSDT` |
-| **Coinbase** | canal `matches` | `wss://ws-feed.exchange.coinbase.com` | `BTC-USD` |
+| **Coinbase** | `matches` channel | `wss://ws-feed.exchange.coinbase.com` | `BTC-USD` |
 
-Documentación oficial Binance: [Binance Spot WebSocket Streams](https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams).
+Official Binance documentation: [Binance Spot WebSocket Streams](https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams).
 
 ---
 
-## Arquitectura
+## Architecture
 
 ```text
 ┌─────────────────────┐
@@ -74,7 +74,7 @@ Documentación oficial Binance: [Binance Spot WebSocket Streams](https://develop
            │ TradeEventHandler (async callback)
            ▼
 ┌─────────────────────┐
-│ ResilientWebSocket  │  reconexión exponencial + jitter
+│ ResilientWebSocket  │  exponential reconnection + jitter
 │       Feed          │
 └──────────┬──────────┘
            │ ExchangeFeedAdapter (Protocol)
@@ -86,39 +86,39 @@ Documentación oficial Binance: [Binance Spot WebSocket Streams](https://develop
 └─────────┘ └──────────┘
 ```
 
-### Componentes principales
+### Main components
 
-| Módulo | Responsabilidad |
+| Module | Responsibility |
 |--------|-----------------|
 | `models.py` | `TradeEvent`, `FeedConfig`, `ReconnectPolicy`, `ExchangeId` |
-| `protocols.py` | Contratos: `ExchangeFeedAdapter`, `TradeMessageParser`, `FeedHandler` |
-| `feed_client.py` | Cliente genérico con reconexión, ping y callbacks |
-| `exchanges/binance.py` | Parser y adapter para stream `@trade` |
-| `exchanges/coinbase.py` | Parser y adapter para canal `matches` |
-| `reconnect.py` | Cálculo de backoff exponencial con jitter aleatorio |
+| `protocols.py` | Contracts: `ExchangeFeedAdapter`, `TradeMessageParser`, `FeedHandler` |
+| `feed_client.py` | Generic client with reconnection, ping, and callbacks |
+| `exchanges/binance.py` | Parser and adapter for the `@trade` stream |
+| `exchanges/coinbase.py` | Parser and adapter for the `matches` channel |
+| `reconnect.py` | Exponential backoff calculation with random jitter |
 
-### Decisiones técnicas
+### Technical decisions
 
-- **Precisión financiera:** precios y cantidades son `Decimal`, nunca `float`.
-- **Interfaces primero:** añadir un exchange nuevo = implementar un adapter; el cliente base no cambia.
-- **Errores explícitos:** fallos de red y parseo se registran y activan reconexión; nunca `except: pass`.
-- **Memoria:** el parser se reutiliza por sesión; se evita crear objetos innecesarios por mensaje.
+- **Financial precision:** prices and quantities are `Decimal`, never `float`.
+- **Interfaces first:** adding a new exchange = implementing an adapter; the base client doesn't change.
+- **Explicit errors:** network and parsing failures are logged and trigger reconnection; never `except: pass`.
+- **Memory:** the parser is reused per session; unnecessary object creation per message is avoided.
 
 ---
 
-## Modelo de datos: `TradeEvent`
+## Data model: `TradeEvent`
 
-| Campo | Tipo | Descripción |
+| Field | Type | Description |
 |-------|------|-------------|
-| `exchange` | `ExchangeId` | `binance` o `coinbase` |
-| `symbol` | `str` | Símbolo normalizado del exchange |
-| `trade_id` | `str` | Identificador único del trade en el exchange |
-| `price` | `Decimal` | Precio de ejecución |
-| `quantity` | `Decimal` | Cantidad ejecutada |
-| `side` | `TradeSide` | `buy` o `sell` (lado agresor) |
-| `event_time` | `datetime` | Timestamp UTC del exchange |
+| `exchange` | `ExchangeId` | `binance` or `coinbase` |
+| `symbol` | `str` | Exchange-normalized symbol |
+| `trade_id` | `str` | Unique trade identifier on the exchange |
+| `price` | `Decimal` | Execution price |
+| `quantity` | `Decimal` | Executed quantity |
+| `side` | `TradeSide` | `buy` or `sell` (aggressor side) |
+| `event_time` | `datetime` | Exchange UTC timestamp |
 
-Ejemplo JSONL compatible con `market-data-lakehouse`:
+Example JSONL compatible with `market-data-lakehouse`:
 
 ```json
 {
@@ -134,14 +134,14 @@ Ejemplo JSONL compatible con `market-data-lakehouse`:
 
 ---
 
-## Requisitos
+## Requirements
 
 - Python **3.11+**
-- `pip` compatible con `pyproject.toml`
+- `pip` compatible with `pyproject.toml`
 
 ---
 
-## Instalación
+## Installation
 
 ```bash
 cd websocket-feed-handler
@@ -152,7 +152,7 @@ pip install -e ".[dev]"
 
 ---
 
-## Uso CLI
+## CLI usage
 
 ### Binance
 
@@ -166,15 +166,15 @@ websocket-feed-handler --exchange binance --symbols BTCUSDT ETHUSDT
 websocket-feed-handler --exchange coinbase --symbols BTC-USD ETH-USD
 ```
 
-### Opciones útiles
+### Useful options
 
-| Flag | Descripción |
+| Flag | Description |
 |------|-------------|
-| `--exchange` | `binance` o `coinbase` |
-| `--symbols` | Lista de símbolos separados por espacio |
+| `--exchange` | `binance` or `coinbase` |
+| `--symbols` | Space-separated list of symbols |
 | `--log-level` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 
-Salida esperada:
+Expected output:
 
 ```text
 2026-06-28 12:00:01 INFO trade exchange=binance symbol=BTCUSDT id=123456 price=67234.50 qty=0.015 side=buy
@@ -182,7 +182,7 @@ Salida esperada:
 
 ---
 
-## Uso programático
+## Programmatic usage
 
 ```python
 import asyncio
@@ -214,22 +214,22 @@ if __name__ == "__main__":
 
 ---
 
-## Política de reconexión
+## Reconnection policy
 
-`ReconnectPolicy` por defecto:
+Default `ReconnectPolicy`:
 
-| Parámetro | Valor | Efecto |
+| Parameter | Value | Effect |
 |-----------|-------|--------|
-| `initial_delay_seconds` | 1.0 s | Primer reintento tras desconexión |
-| `max_delay_seconds` | 60.0 s | Tope del backoff |
-| `backoff_multiplier` | 2.0 | Duplica el retardo en cada intento |
-| `jitter_ratio` | 0.1 | Aleatoriedad ±10 % para evitar thundering herd |
+| `initial_delay_seconds` | 1.0 s | First retry after disconnection |
+| `max_delay_seconds` | 60.0 s | Backoff cap |
+| `backoff_multiplier` | 2.0 | Doubles the delay on each attempt |
+| `jitter_ratio` | 0.1 | ±10% randomness to avoid a thundering herd |
 
-La reconexión se detiene con `await feed.stop()` o señales `SIGINT` / `SIGTERM` en la CLI.
+Reconnection stops with `await feed.stop()` or `SIGINT` / `SIGTERM` signals in the CLI.
 
 ---
 
-## Desarrollo
+## Development
 
 ```bash
 pytest -q
@@ -239,15 +239,15 @@ mypy src
 
 ---
 
-## Roadmap del módulo
+## Module roadmap
 
-- [ ] Streams avanzados Binance (`aggTrade`, `bookTicker`)
-- [ ] Métricas de latencia (timestamp exchange vs recepción local)
-- [ ] Publicación opcional a cola (`asyncio.Queue` / Redis / NATS)
-- [ ] Tests de integración con mock WebSocket server
+- [ ] Advanced Binance streams (`aggTrade`, `bookTicker`)
+- [ ] Latency metrics (exchange timestamp vs. local reception)
+- [ ] Optional publishing to a queue (`asyncio.Queue` / Redis / NATS)
+- [ ] Integration tests with a mock WebSocket server
 
 ---
 
-## Licencia
+## License
 
 MIT
