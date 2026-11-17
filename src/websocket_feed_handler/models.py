@@ -6,6 +6,8 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Literal
 
+from websocket_feed_handler.staleness import StalenessPolicy
+
 
 class ExchangeId(StrEnum):
     BINANCE = "binance"
@@ -105,6 +107,8 @@ class FeedConfig:
     channels: tuple[StreamChannel, ...] = (StreamChannel.TRADE,)
     depth_speed_ms: int = 100
     websocket_base_url: str | None = None
+    staleness: StalenessPolicy | None = None
+    status_path: str | None = None
 
     def __post_init__(self) -> None:
         if not self.symbols:
@@ -119,7 +123,9 @@ class FeedConfig:
             raise ValueError("ping_timeout_seconds must be positive")
 
 
-ConnectionEventType = Literal["connected", "disconnected", "reconnecting", "stopped", "error"]
+ConnectionEventType = Literal[
+    "connected", "disconnected", "reconnecting", "stopped", "error", "stale", "fresh"
+]
 
 
 @dataclass(frozen=True, slots=True)
