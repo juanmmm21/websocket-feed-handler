@@ -2,13 +2,24 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import signal
 from collections.abc import Sequence
+from pathlib import Path
+from typing import IO, Any
 
 from websocket_feed_handler.exchanges import create_exchange_adapter
 from websocket_feed_handler.feed_client import ResilientWebSocketFeed
-from websocket_feed_handler.models import ConnectionEvent, ExchangeId, FeedConfig, TradeEvent
+from websocket_feed_handler.models import (
+    ConnectionEvent,
+    DepthDiffEvent,
+    ExchangeId,
+    FeedConfig,
+    StreamChannel,
+    TradeEvent,
+)
+from websocket_feed_handler.serialization import depth_diff_to_record, trade_to_record
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,6 +39,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Símbolos a suscribir (ej: BTCUSDT para Binance, BTC-USD para Coinbase).",
     )
     parser.add_argument(
+        "--channels",
+        nargs="+",
+        choices=[channel.value for channel in StreamChannel],
+        default=[StreamChannel.TRADE.value],
+        help="Streams a suscribir: trade y/o depth (diffs L2, solo Binance).",
+    )
+    parser.add_argument("--depth-speed-ms", type=int, choices=[100, 1000], default=100)
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="URL base del WebSocket (ej: wss://data-stream.binance.vision).",
+    )
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Graba los eventos en JSON Lines (append) en lugar de solo loguearlos.",
+    )
+    parser.add_argument(
+        "--duration-seconds",
+        type=float,
+        default=None,
+        help="Detiene la grabación tras N segundos.",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -36,8 +71,31 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-async def _run_feed(exchange: ExchangeId, symbols: Sequence[str]) -> None:
-    config = FeedConfig(exchange=exchange, symbols=tuple(symbols))
+async def _run_feed(
+    exchange: ExchangeId,
+    symbols: Sequence[str],
+    *,
+    channels: Sequence[str] = ("trade",),
+    depth_speed_ms: int = 100,
+    base_url: str | None = None,
+    output: str | None = None,
+    duration_seconds: float | None = None,
+) -> None:
+    config = FeedConfig(
+        exchange=exchange,
+        symbols=tuple(symbols),
+        channels=tuple(StreamChannel(channel) for channel in channels),
+        depth_speed_ms=depth_speed_ms,
+        websocket_base_url=base_url,
+    )
+    sink: IO[str] | None = None
+    if output is not None:
+        Path(output).parent.mkdir(parents=True, exist_ok=True)
+        sink = open(output, "a", encoding="utf-8")  # noqa: SIM115 - closed in finally
+
+    def _write(record: dict[str, Any]) -> None:
+        if sink is not None:
+            sink.write(json.dumps(record) + "\n")
     adapter = create_exchange_adapter(exchange)
     feed = ResilientWebSocketFeed(config=config, adapter=adapter)
 
@@ -50,7 +108,23 @@ async def _run_feed(exchange: ExchangeId, symbols: Sequence[str]) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _request_shutdown)
 
+    async def on_depth(event: DepthDiffEvent) -> None:
+        if sink is not None:
+            _write(depth_diff_to_record(event))
+            return
+        logging.getLogger(__name__).info(
+            "depth symbol=%s U=%s u=%s bids=%s asks=%s",
+            event.symbol,
+            event.first_update_id,
+            event.final_update_id,
+            len(event.bids),
+            len(event.asks),
+        )
+
     async def on_trade(trade: TradeEvent) -> None:
+        if sink is not None:
+            _write(trade_to_record(trade))
+            return
         logging.getLogger(__name__).info(
             "trade exchange=%s symbol=%s id=%s price=%s qty=%s side=%s",
             trade.exchange.value,
@@ -71,23 +145,34 @@ async def _run_feed(exchange: ExchangeId, symbols: Sequence[str]) -> None:
         )
 
     feed_task = asyncio.create_task(
-        feed.run(on_trade=on_trade, on_connection_event=on_connection_event),
+        feed.run(
+            on_trade=on_trade,
+            on_connection_event=on_connection_event,
+            on_depth=on_depth if StreamChannel.DEPTH in config.channels else None,
+        ),
     )
     stop_task = asyncio.create_task(stop_event.wait())
+    if duration_seconds is not None:
+        loop.call_later(duration_seconds, stop_event.set)
 
-    done, _ = await asyncio.wait(
-        {feed_task, stop_task},
-        return_when=asyncio.FIRST_COMPLETED,
-    )
+    try:
+        done, _ = await asyncio.wait(
+            {feed_task, stop_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
 
-    for task in done:
-        if task is feed_task and feed_task.exception() is not None:
-            raise feed_task.exception()  # type: ignore[misc]
+        for task in done:
+            if task is feed_task and feed_task.exception() is not None:
+                raise feed_task.exception()  # type: ignore[misc]
 
-    await feed.stop()
-    if not feed_task.done():
-        feed_task.cancel()
-        await asyncio.gather(feed_task, return_exceptions=True)
+        await feed.stop()
+        if not feed_task.done():
+            feed_task.cancel()
+            await asyncio.gather(feed_task, return_exceptions=True)
+    finally:
+        stop_task.cancel()
+        if sink is not None:
+            sink.close()
 
 
 def main() -> None:
@@ -98,7 +183,17 @@ def main() -> None:
     )
 
     exchange = ExchangeId(args.exchange)
-    asyncio.run(_run_feed(exchange=exchange, symbols=args.symbols))
+    asyncio.run(
+        _run_feed(
+            exchange=exchange,
+            symbols=args.symbols,
+            channels=args.channels,
+            depth_speed_ms=args.depth_speed_ms,
+            base_url=args.base_url,
+            output=args.output,
+            duration_seconds=args.duration_seconds,
+        )
+    )
 
 
 if __name__ == "__main__":
