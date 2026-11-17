@@ -1,0 +1,14 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "websocket-feed-handler-rs"
+version = "0.2.0"
+description = "Optional Rust accelerator for websocket-feed-handler. Results are identical to the Python fallback."
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+[tool.maturin]
+features = ["extension-module"]
+module-name = "websocket_feed_handler_rs"
