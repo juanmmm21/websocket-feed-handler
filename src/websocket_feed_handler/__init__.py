@@ -10,6 +10,7 @@ from websocket_feed_handler.models import (
     StreamChannel,
     TradeEvent,
 )
+from websocket_feed_handler.staleness import StalenessMonitor, StalenessPolicy
 
 __all__ = [
     "ConnectionEvent",
@@ -19,6 +20,8 @@ __all__ = [
     "FeedConfig",
     "ReconnectPolicy",
     "ResilientWebSocketFeed",
+    "StalenessMonitor",
+    "StalenessPolicy",
     "StreamChannel",
     "TradeEvent",
     "create_exchange_adapter",

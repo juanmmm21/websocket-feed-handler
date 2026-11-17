@@ -20,6 +20,7 @@ from websocket_feed_handler.models import (
     TradeEvent,
 )
 from websocket_feed_handler.serialization import depth_diff_to_record, trade_to_record
+from websocket_feed_handler.staleness import StalenessPolicy
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -63,6 +64,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Detiene la grabación tras N segundos.",
     )
     parser.add_argument(
+        "--stale-after-seconds",
+        type=float,
+        default=15.0,
+        help="Marca el stream como obsoleto tras N s sin mensajes (0 = desactivado).",
+    )
+    parser.add_argument(
+        "--max-event-lag-seconds",
+        type=float,
+        default=5.0,
+        help="Obsoleto también si la hora del exchange va más de N s por detrás.",
+    )
+    parser.add_argument(
+        "--reconnect-on-stale",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Cierra y reconecta un socket silencioso.",
+    )
+    parser.add_argument(
+        "--status-file",
+        default=None,
+        help="Escribe aquí el estado (stale, silencio, lag) en JSON cada segundo.",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -80,6 +104,8 @@ async def _run_feed(
     base_url: str | None = None,
     output: str | None = None,
     duration_seconds: float | None = None,
+    staleness: StalenessPolicy | None = None,
+    status_file: str | None = None,
 ) -> None:
     config = FeedConfig(
         exchange=exchange,
@@ -87,6 +113,8 @@ async def _run_feed(
         channels=tuple(StreamChannel(channel) for channel in channels),
         depth_speed_ms=depth_speed_ms,
         websocket_base_url=base_url,
+        staleness=staleness,
+        status_path=status_file,
     )
     sink: IO[str] | None = None
     if output is not None:
@@ -192,6 +220,14 @@ def main() -> None:
             base_url=args.base_url,
             output=args.output,
             duration_seconds=args.duration_seconds,
+            staleness=StalenessPolicy(
+                stale_after_seconds=args.stale_after_seconds,
+                max_event_lag_seconds=args.max_event_lag_seconds or None,
+                reconnect_on_stale=args.reconnect_on_stale,
+            )
+            if args.stale_after_seconds > 0
+            else None,
+            status_file=args.status_file,
         )
     )
 
