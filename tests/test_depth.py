@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 import websockets
@@ -135,3 +136,18 @@ async def test_depth_channel_requires_a_handler() -> None:
 
     with pytest.raises(ValueError):
         await feed.run(on_trade)
+
+
+def test_rotating_sink_rotates_before_exceeding_the_limit(tmp_path: Path) -> None:
+    from websocket_feed_handler.serialization import RotatingJsonlSink
+
+    path = tmp_path / "ticks.jsonl"
+    sink = RotatingJsonlSink(path, max_bytes=60)
+    for index in range(5):
+        sink.write({"i": index, "pad": "xxxxxxxxxxxxxxxx"})
+    sink.close()
+    assert sink.rotations >= 1
+    rotated = (tmp_path / "ticks.jsonl.1").read_text(encoding="utf-8").splitlines()
+    current = path.read_text(encoding="utf-8").splitlines()
+    assert all(len(line) + 1 <= 60 for line in rotated + current)
+    assert json.loads(current[-1])["i"] == 4

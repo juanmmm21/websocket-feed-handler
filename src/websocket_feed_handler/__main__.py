@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import logging
 import signal
 from collections.abc import Sequence
-from pathlib import Path
-from typing import IO, Any
+from typing import Any
 
 from websocket_feed_handler.exchanges import create_exchange_adapter
 from websocket_feed_handler.feed_client import ResilientWebSocketFeed
@@ -19,7 +17,11 @@ from websocket_feed_handler.models import (
     StreamChannel,
     TradeEvent,
 )
-from websocket_feed_handler.serialization import depth_diff_to_record, trade_to_record
+from websocket_feed_handler.serialization import (
+    RotatingJsonlSink,
+    depth_diff_to_record,
+    trade_to_record,
+)
 from websocket_feed_handler.staleness import StalenessPolicy
 
 
@@ -56,6 +58,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         default=None,
         help="Graba los eventos en JSON Lines (append) en lugar de solo loguearlos.",
+    )
+    parser.add_argument(
+        "--rotate-bytes",
+        type=int,
+        default=0,
+        help="Rota --output a <fichero>.1 al superar N bytes (0 = sin rotación).",
     )
     parser.add_argument(
         "--duration-seconds",
@@ -106,6 +114,7 @@ async def _run_feed(
     duration_seconds: float | None = None,
     staleness: StalenessPolicy | None = None,
     status_file: str | None = None,
+    rotate_bytes: int = 0,
 ) -> None:
     config = FeedConfig(
         exchange=exchange,
@@ -116,14 +125,11 @@ async def _run_feed(
         staleness=staleness,
         status_path=status_file,
     )
-    sink: IO[str] | None = None
-    if output is not None:
-        Path(output).parent.mkdir(parents=True, exist_ok=True)
-        sink = open(output, "a", encoding="utf-8")  # noqa: SIM115 - closed in finally
+    sink = RotatingJsonlSink(output, max_bytes=rotate_bytes) if output is not None else None
 
     def _write(record: dict[str, Any]) -> None:
         if sink is not None:
-            sink.write(json.dumps(record) + "\n")
+            sink.write(record)
     adapter = create_exchange_adapter(exchange)
     feed = ResilientWebSocketFeed(config=config, adapter=adapter)
 
@@ -228,6 +234,7 @@ def main() -> None:
             if args.stale_after_seconds > 0
             else None,
             status_file=args.status_file,
+            rotate_bytes=args.rotate_bytes,
         )
     )
 
