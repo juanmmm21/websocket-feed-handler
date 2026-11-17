@@ -5,7 +5,6 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Any
 
 import websockets
 from websockets.asyncio.client import ClientConnection
@@ -20,6 +19,7 @@ from websocket_feed_handler.protocols import (
     ConnectionEventHandler,
     ExchangeFeedAdapter,
     TradeEventHandler,
+    TradeMessageParser,
 )
 from websocket_feed_handler.reconnect import compute_backoff_delay
 
@@ -157,7 +157,7 @@ class ResilientWebSocketFeed:
 
     def _parse_trade_message(
         self,
-        parser: Any,
+        parser: TradeMessageParser,
         raw_message: str | bytes,
     ) -> TradeEvent | None:
         decoded = raw_message.decode("utf-8") if isinstance(raw_message, bytes) else raw_message
