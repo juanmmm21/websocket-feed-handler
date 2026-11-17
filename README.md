@@ -65,6 +65,44 @@ Official Binance documentation: [Binance Spot WebSocket Streams](https://develop
 
 ---
 
+## L2 depth diffs (Binance)
+
+Besides trades, the client can subscribe to Binance's **diff-depth** stream
+(`<symbol>@depth@100ms`, or `@depth` for 1 s) on the same socket and emit `DepthDiffEvent`s:
+
+| Field | Description |
+|-------|-------------|
+| `first_update_id` / `final_update_id` | Binance `U` / `u`; the next event must start at `u + 1` |
+| `bids` / `asks` | `(price, quantity)` as `Decimal`; quantity `0` removes the level |
+| `event_time` | exchange time (`E`) |
+| `received_at` | local receipt time (UTC), used to measure feed latency |
+
+Sequence checking, snapshots and resynchronisation are the job of `order-book-reconstructor`;
+this module only delivers the diffs faithfully (parse errors are logged, never silently fixed).
+
+```bash
+# record 90 minutes of trades + depth diffs as JSONL (for market-data-lakehouse ingest-depth)
+websocket-feed-handler --symbols BTCUSDT --channels trade depth \
+  --base-url wss://data-stream.binance.vision \
+  --output stream.jsonl --duration-seconds 5400
+```
+
+`wss://data-stream.binance.vision` is Binance's market-data-only endpoint (same payloads); use it
+where `stream.binance.com` is not reachable.
+
+```python
+config = FeedConfig(
+    exchange=ExchangeId.BINANCE,
+    symbols=("BTCUSDT",),
+    channels=(StreamChannel.TRADE, StreamChannel.DEPTH),
+)
+await ResilientWebSocketFeed(config, create_exchange_adapter(ExchangeId.BINANCE)).run(
+    on_trade=handle_trade, on_depth=handle_diff
+)
+```
+
+---
+
 ## Architecture
 
 ```text
