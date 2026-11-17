@@ -103,6 +103,31 @@ await ResilientWebSocketFeed(config, create_exchange_adapter(ExchangeId.BINANCE)
 
 ---
 
+## Stale-data detection
+
+An open socket is not proof of live data. `StalenessMonitor` watches every subscribed stream:
+
+| Condition | Meaning |
+|-----------|---------|
+| silence > `stale_after_seconds` | nothing received (stuck stream, silent proxy, exchange incident) |
+| receipt time − exchange `event_time` > `max_event_lag_seconds` | data arrives but late (backlog) |
+
+Only transitions are emitted, as `ConnectionEvent`s of type `stale` and `fresh`, so a consumer can
+stop trading on `stale` and resume on `fresh`. With `reconnect_on_stale` a silent socket is closed
+and reconnected with the usual backoff; `feed.health()` and `--status-file` expose per-stream
+silence, lag and message counts (the file is rewritten atomically every second).
+
+```bash
+websocket-feed-handler --symbols BTCUSDT --stale-after-seconds 15 --max-event-lag-seconds 5 \
+  --status-file data/live/feed_status.json
+```
+
+The CLI enables detection by default (15 s / 5 s); the library leaves it off unless
+`FeedConfig(staleness=StalenessPolicy(...))` is given. v0.2.0 also fixes a crash: after a
+cleanly closed session the backoff was computed for attempt 0 and raised instead of reconnecting.
+
+---
+
 ## Architecture
 
 ```text
