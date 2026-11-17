@@ -12,11 +12,15 @@ from websockets.asyncio.client import ClientConnection
 from websocket_feed_handler.models import (
     ConnectionEvent,
     ConnectionState,
+    DepthDiffEvent,
     FeedConfig,
+    StreamChannel,
     TradeEvent,
 )
 from websocket_feed_handler.protocols import (
     ConnectionEventHandler,
+    DepthEventHandler,
+    DepthMessageParser,
     ExchangeFeedAdapter,
     TradeEventHandler,
     TradeMessageParser,
@@ -45,14 +49,17 @@ class ResilientWebSocketFeed:
         self,
         on_trade: TradeEventHandler,
         on_connection_event: ConnectionEventHandler | None = None,
+        on_depth: DepthEventHandler | None = None,
     ) -> None:
+        if StreamChannel.DEPTH in self._config.channels and on_depth is None:
+            raise ValueError("on_depth is required when the depth channel is subscribed")
         attempt = 0
         self._stop_event.clear()
 
         while not self._stop_event.is_set():
             attempt += 1
             try:
-                await self._connect_session(on_trade, on_connection_event, attempt)
+                await self._connect_session(on_trade, on_connection_event, on_depth, attempt)
                 attempt = 0
             except asyncio.CancelledError:
                 raise
@@ -106,6 +113,7 @@ class ResilientWebSocketFeed:
         self,
         on_trade: TradeEventHandler,
         on_connection_event: ConnectionEventHandler | None,
+        on_depth: DepthEventHandler | None,
         attempt: int,
     ) -> None:
         url = self._adapter.build_websocket_url(self._config)
@@ -131,13 +139,18 @@ class ResilientWebSocketFeed:
 
             await self._send_subscriptions(connection)
             parser = self._adapter.create_parser()
+            depth_parser = (
+                self._adapter.create_depth_parser()
+                if StreamChannel.DEPTH in self._config.channels
+                else None
+            )
 
             async for raw_message in connection:
                 if self._stop_event.is_set():
                     break
 
                 try:
-                    trade = self._parse_trade_message(parser, raw_message)
+                    event = self._parse_message(parser, depth_parser, raw_message)
                 except Exception:
                     logger.exception(
                         "failed to parse message exchange=%s",
@@ -145,21 +158,22 @@ class ResilientWebSocketFeed:
                     )
                     continue
 
-                if trade is None:
-                    continue
-
-                await on_trade(trade)
-                await self._trade_queue.put(trade)
+                if isinstance(event, TradeEvent):
+                    await on_trade(event)
+                    await self._trade_queue.put(event)
+                elif isinstance(event, DepthDiffEvent) and on_depth is not None:
+                    await on_depth(event)
 
     async def _send_subscriptions(self, connection: ClientConnection) -> None:
         for message in self._adapter.build_subscribe_messages(self._config):
             await connection.send(json.dumps(message))
 
-    def _parse_trade_message(
+    def _parse_message(
         self,
         parser: TradeMessageParser,
+        depth_parser: DepthMessageParser | None,
         raw_message: str | bytes,
-    ) -> TradeEvent | None:
+    ) -> TradeEvent | DepthDiffEvent | None:
         decoded = raw_message.decode("utf-8") if isinstance(raw_message, bytes) else raw_message
 
         payload = json.loads(decoded)
@@ -167,7 +181,10 @@ class ResilientWebSocketFeed:
             return None
 
         normalized = self._adapter.unwrap_payload(payload)
-        return parser.parse(normalized)
+        trade = parser.parse(normalized)
+        if trade is not None or depth_parser is None:
+            return trade
+        return depth_parser.parse(normalized)
 
     async def _emit_connection_event(
         self,

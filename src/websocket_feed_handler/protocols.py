@@ -3,7 +3,12 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Protocol
 
-from websocket_feed_handler.models import ConnectionEvent, FeedConfig, TradeEvent
+from websocket_feed_handler.models import (
+    ConnectionEvent,
+    DepthDiffEvent,
+    FeedConfig,
+    TradeEvent,
+)
 
 
 class TradeMessageParser(Protocol):
@@ -12,6 +17,12 @@ class TradeMessageParser(Protocol):
     def parse(self, payload: dict[str, object]) -> TradeEvent | None:
         """Retorna None si el mensaje no corresponde a un trade ejecutado."""
         ...
+
+
+class DepthMessageParser(Protocol):
+    """Contrato para diffs de profundidad L2; None si el mensaje no es un diff."""
+
+    def parse(self, payload: dict[str, object]) -> DepthDiffEvent | None: ...
 
 
 class ExchangeFeedAdapter(Protocol):
@@ -28,11 +39,15 @@ class ExchangeFeedAdapter(Protocol):
     def create_parser(self) -> TradeMessageParser:
         ...
 
+    def create_depth_parser(self) -> DepthMessageParser | None:
+        ...
+
     def unwrap_payload(self, raw_message: dict[str, object]) -> dict[str, object]:
         ...
 
 
 TradeEventHandler = Callable[[TradeEvent], Awaitable[None]]
+DepthEventHandler = Callable[[DepthDiffEvent], Awaitable[None]]
 ConnectionEventHandler = Callable[[ConnectionEvent], Awaitable[None]]
 
 
