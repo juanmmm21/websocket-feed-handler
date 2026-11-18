@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    name: tests (${{ matrix.backend }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [python, rust]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - if: matrix.backend == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+      - if: matrix.backend == 'rust'
+        run: pip install ./rust
+      - run: ruff check src tests
+      - run: mypy src
+      - run: python -c "import websocket_feed_handler.fast as f; print('backend', f.BACKEND)"
+      - run: pytest -q
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - working-directory: rust
+        run: cargo fmt --check
+      - working-directory: rust
+        run: cargo clippy --all-targets -- -D warnings
+      - working-directory: rust
+        run: cargo test

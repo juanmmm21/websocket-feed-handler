@@ -6,6 +6,8 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Literal
 
+from websocket_feed_handler.staleness import StalenessPolicy
+
 
 class ExchangeId(StrEnum):
     BINANCE = "binance"
@@ -18,6 +20,11 @@ class ConnectionState(StrEnum):
     CONNECTED = "connected"
     RECONNECTING = "reconnecting"
     STOPPED = "stopped"
+
+
+class StreamChannel(StrEnum):
+    TRADE = "trade"
+    DEPTH = "depth"
 
 
 class TradeSide(StrEnum):
@@ -46,6 +53,31 @@ class TradeEvent:
             raise ValueError("quantity must be positive")
 
 
+DepthLevel = tuple[Decimal, Decimal]
+
+
+@dataclass(frozen=True, slots=True)
+class DepthDiffEvent:
+    """Incremental L2 update (Binance ``depthUpdate``): absolute quantities, 0 removes a level.
+
+    ``first_update_id``/``final_update_id`` (``U``/``u``) let the order book check that no
+    update was lost: each event must start at the previous one's ``final_update_id + 1``.
+    """
+
+    exchange: ExchangeId
+    symbol: str
+    first_update_id: int
+    final_update_id: int
+    bids: tuple[DepthLevel, ...]
+    asks: tuple[DepthLevel, ...]
+    event_time: datetime
+    received_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.final_update_id < self.first_update_id:
+            raise ValueError("final_update_id must be >= first_update_id")
+
+
 @dataclass(frozen=True, slots=True)
 class ReconnectPolicy:
     initial_delay_seconds: float = 1.0
@@ -72,17 +104,28 @@ class FeedConfig:
     ping_interval_seconds: float = 20.0
     ping_timeout_seconds: float = 20.0
     close_timeout_seconds: float = 10.0
+    channels: tuple[StreamChannel, ...] = (StreamChannel.TRADE,)
+    depth_speed_ms: int = 100
+    websocket_base_url: str | None = None
+    staleness: StalenessPolicy | None = None
+    status_path: str | None = None
 
     def __post_init__(self) -> None:
         if not self.symbols:
             raise ValueError("symbols must not be empty")
+        if not self.channels:
+            raise ValueError("channels must not be empty")
+        if self.depth_speed_ms not in {100, 1000}:
+            raise ValueError("depth_speed_ms must be 100 or 1000")
         if self.ping_interval_seconds <= 0:
             raise ValueError("ping_interval_seconds must be positive")
         if self.ping_timeout_seconds <= 0:
             raise ValueError("ping_timeout_seconds must be positive")
 
 
-ConnectionEventType = Literal["connected", "disconnected", "reconnecting", "stopped", "error"]
+ConnectionEventType = Literal[
+    "connected", "disconnected", "reconnecting", "stopped", "error", "stale", "fresh"
+]
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 
-from websocket_feed_handler.models import ExchangeId, TradeEvent, TradeSide, utc_from_millis
+from websocket_feed_handler.models import (
+    DepthDiffEvent,
+    DepthLevel,
+    ExchangeId,
+    TradeEvent,
+    TradeSide,
+    utc_from_millis,
+)
 
 
 class BinanceTradeParser:
@@ -33,6 +41,43 @@ class BinanceTradeParser:
             is_buyer_maker=is_buyer_maker,
             raw_payload=payload,
         )
+
+
+class BinanceDepthDiffParser:
+    """Parser del stream ``<symbol>@depth[@100ms]`` (diff depth) de Binance Spot."""
+
+    def parse(self, payload: dict[str, object]) -> DepthDiffEvent | None:
+        if payload.get("e") != "depthUpdate":
+            return None
+        return DepthDiffEvent(
+            exchange=ExchangeId.BINANCE,
+            symbol=_require_str(payload, "s"),
+            first_update_id=_require_int(payload, "U"),
+            final_update_id=_require_int(payload, "u"),
+            bids=_require_levels(payload, "b"),
+            asks=_require_levels(payload, "a"),
+            event_time=utc_from_millis(_require_int(payload, "E")),
+            received_at=datetime.now(tz=UTC),
+        )
+
+
+def _require_levels(payload: dict[str, object], key: str) -> tuple[DepthLevel, ...]:
+    raw = payload.get(key)
+    if not isinstance(raw, list):
+        raise ValueError(f"expected list field '{key}'")
+    levels: list[DepthLevel] = []
+    for entry in raw:
+        if not isinstance(entry, list) or len(entry) != 2:
+            raise ValueError(f"malformed level in '{key}'")
+        price, quantity = entry
+        if not isinstance(price, str) or not isinstance(quantity, str):
+            raise ValueError(f"level values in '{key}' must be strings")
+        parsed_price = Decimal(price)
+        parsed_quantity = Decimal(quantity)
+        if parsed_price <= 0 or parsed_quantity < 0:
+            raise ValueError(f"invalid level in '{key}'")
+        levels.append((parsed_price, parsed_quantity))
+    return tuple(levels)
 
 
 def _require_str(payload: dict[str, object], key: str) -> str:

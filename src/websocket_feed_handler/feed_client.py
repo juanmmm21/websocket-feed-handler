@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Any
 
 import websockets
 from websockets.asyncio.client import ClientConnection
@@ -13,15 +13,21 @@ from websockets.asyncio.client import ClientConnection
 from websocket_feed_handler.models import (
     ConnectionEvent,
     ConnectionState,
+    DepthDiffEvent,
     FeedConfig,
+    StreamChannel,
     TradeEvent,
 )
 from websocket_feed_handler.protocols import (
     ConnectionEventHandler,
+    DepthEventHandler,
+    DepthMessageParser,
     ExchangeFeedAdapter,
     TradeEventHandler,
+    TradeMessageParser,
 )
 from websocket_feed_handler.reconnect import compute_backoff_delay
+from websocket_feed_handler.staleness import StalenessMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -36,23 +42,42 @@ class ResilientWebSocketFeed:
         self._stop_event = asyncio.Event()
         self._trade_queue: asyncio.Queue[TradeEvent | None] = asyncio.Queue()
         self._connection: ClientConnection | None = None
+        self._monitor = StalenessMonitor(config.staleness) if config.staleness else None
+        self.stale_reconnects = 0
 
     @property
     def state(self) -> ConnectionState:
         return self._state
 
+    def health(self) -> dict[str, object]:
+        """Connection state plus per-stream silence and lag (empty if staleness is off)."""
+        payload: dict[str, object] = {"state": self._state.value}
+        if self._monitor is not None:
+            payload.update(self._monitor.health())
+        return payload
+
+    def _stream_names(self) -> tuple[str, ...]:
+        return tuple(
+            f"{symbol.upper()}@{channel.value}"
+            for symbol in self._config.symbols
+            for channel in self._config.channels
+        )
+
     async def run(
         self,
         on_trade: TradeEventHandler,
         on_connection_event: ConnectionEventHandler | None = None,
+        on_depth: DepthEventHandler | None = None,
     ) -> None:
+        if StreamChannel.DEPTH in self._config.channels and on_depth is None:
+            raise ValueError("on_depth is required when the depth channel is subscribed")
         attempt = 0
         self._stop_event.clear()
 
         while not self._stop_event.is_set():
             attempt += 1
             try:
-                await self._connect_session(on_trade, on_connection_event, attempt)
+                await self._connect_session(on_trade, on_connection_event, on_depth, attempt)
                 attempt = 0
             except asyncio.CancelledError:
                 raise
@@ -73,7 +98,7 @@ class ResilientWebSocketFeed:
                 break
 
             self._state = ConnectionState.RECONNECTING
-            delay = compute_backoff_delay(attempt, self._config.reconnect_policy)
+            delay = compute_backoff_delay(max(attempt, 1), self._config.reconnect_policy)
             await self._emit_connection_event(
                 on_connection_event,
                 "reconnecting",
@@ -106,6 +131,7 @@ class ResilientWebSocketFeed:
         self,
         on_trade: TradeEventHandler,
         on_connection_event: ConnectionEventHandler | None,
+        on_depth: DepthEventHandler | None,
         attempt: int,
     ) -> None:
         url = self._adapter.build_websocket_url(self._config)
@@ -130,36 +156,103 @@ class ResilientWebSocketFeed:
             )
 
             await self._send_subscriptions(connection)
-            parser = self._adapter.create_parser()
+            watchdog: asyncio.Task[None] | None = None
+            if self._monitor is not None:
+                self._monitor.start(self._stream_names())
+                watchdog = asyncio.create_task(
+                    self._watch_staleness(connection, on_connection_event)
+                )
+            try:
+                await self._consume(connection, on_trade, on_depth)
+            finally:
+                if watchdog is not None:
+                    watchdog.cancel()
+                    await asyncio.gather(watchdog, return_exceptions=True)
 
-            async for raw_message in connection:
-                if self._stop_event.is_set():
-                    break
+    async def _consume(
+        self,
+        connection: ClientConnection,
+        on_trade: TradeEventHandler,
+        on_depth: DepthEventHandler | None,
+    ) -> None:
+        parser = self._adapter.create_parser()
+        depth_parser = (
+            self._adapter.create_depth_parser()
+            if StreamChannel.DEPTH in self._config.channels
+            else None
+        )
 
-                try:
-                    trade = self._parse_trade_message(parser, raw_message)
-                except Exception:
-                    logger.exception(
-                        "failed to parse message exchange=%s",
-                        self._config.exchange.value,
-                    )
-                    continue
+        async for raw_message in connection:
+            if self._stop_event.is_set():
+                break
 
-                if trade is None:
-                    continue
+            try:
+                event = self._parse_message(parser, depth_parser, raw_message)
+            except Exception:
+                logger.exception(
+                    "failed to parse message exchange=%s",
+                    self._config.exchange.value,
+                )
+                continue
 
-                await on_trade(trade)
-                await self._trade_queue.put(trade)
+            if isinstance(event, TradeEvent):
+                if self._monitor is not None:
+                    self._monitor.observe(f"{event.symbol.upper()}@trade", event.event_time)
+                await on_trade(event)
+                await self._trade_queue.put(event)
+            elif isinstance(event, DepthDiffEvent) and on_depth is not None:
+                if self._monitor is not None:
+                    self._monitor.observe(f"{event.symbol.upper()}@depth", event.event_time)
+                await on_depth(event)
+
+    async def _watch_staleness(
+        self,
+        connection: ClientConnection,
+        on_connection_event: ConnectionEventHandler | None,
+    ) -> None:
+        monitor = self._monitor
+        policy = self._config.staleness
+        assert monitor is not None and policy is not None
+        interval = min(1.0, policy.stale_after_seconds / 4)
+        while True:
+            await asyncio.sleep(interval)
+            for transition in monitor.check():
+                kind = "stale" if transition.stale else "fresh"
+                logger.warning(
+                    "feed %s stream=%s reason=%s", kind, transition.stream, transition.reason
+                )
+                await self._emit_connection_event(
+                    on_connection_event, kind, f"{transition.stream}: {transition.reason}"
+                )
+            self._write_status()
+            if policy.reconnect_on_stale and monitor.max_silence() > policy.stale_after_seconds:
+                self.stale_reconnects += 1
+                logger.warning("closing silent connection to force a reconnect")
+                await connection.close()
+                return
+
+    def _write_status(self) -> None:
+        path = self._config.status_path
+        if path is None:
+            return
+        try:
+            tmp = f"{path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(self.health(), handle)
+            os.replace(tmp, path)
+        except OSError:
+            logger.exception("could not write feed status to %s", path)
 
     async def _send_subscriptions(self, connection: ClientConnection) -> None:
         for message in self._adapter.build_subscribe_messages(self._config):
             await connection.send(json.dumps(message))
 
-    def _parse_trade_message(
+    def _parse_message(
         self,
-        parser: Any,
+        parser: TradeMessageParser,
+        depth_parser: DepthMessageParser | None,
         raw_message: str | bytes,
-    ) -> TradeEvent | None:
+    ) -> TradeEvent | DepthDiffEvent | None:
         decoded = raw_message.decode("utf-8") if isinstance(raw_message, bytes) else raw_message
 
         payload = json.loads(decoded)
@@ -167,7 +260,10 @@ class ResilientWebSocketFeed:
             return None
 
         normalized = self._adapter.unwrap_payload(payload)
-        return parser.parse(normalized)
+        trade = parser.parse(normalized)
+        if trade is not None or depth_parser is None:
+            return trade
+        return depth_parser.parse(normalized)
 
     async def _emit_connection_event(
         self,

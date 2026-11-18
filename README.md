@@ -65,6 +65,69 @@ Official Binance documentation: [Binance Spot WebSocket Streams](https://develop
 
 ---
 
+## L2 depth diffs (Binance)
+
+Besides trades, the client can subscribe to Binance's **diff-depth** stream
+(`<symbol>@depth@100ms`, or `@depth` for 1 s) on the same socket and emit `DepthDiffEvent`s:
+
+| Field | Description |
+|-------|-------------|
+| `first_update_id` / `final_update_id` | Binance `U` / `u`; the next event must start at `u + 1` |
+| `bids` / `asks` | `(price, quantity)` as `Decimal`; quantity `0` removes the level |
+| `event_time` | exchange time (`E`) |
+| `received_at` | local receipt time (UTC), used to measure feed latency |
+
+Sequence checking, snapshots and resynchronisation are the job of `order-book-reconstructor`;
+this module only delivers the diffs faithfully (parse errors are logged, never silently fixed).
+
+```bash
+# record 90 minutes of trades + depth diffs as JSONL (for market-data-lakehouse ingest-depth)
+websocket-feed-handler --symbols BTCUSDT --channels trade depth \
+  --base-url wss://data-stream.binance.vision \
+  --output stream.jsonl --duration-seconds 5400
+```
+
+`wss://data-stream.binance.vision` is Binance's market-data-only endpoint (same payloads); use it
+where `stream.binance.com` is not reachable.
+
+```python
+config = FeedConfig(
+    exchange=ExchangeId.BINANCE,
+    symbols=("BTCUSDT",),
+    channels=(StreamChannel.TRADE, StreamChannel.DEPTH),
+)
+await ResilientWebSocketFeed(config, create_exchange_adapter(ExchangeId.BINANCE)).run(
+    on_trade=handle_trade, on_depth=handle_diff
+)
+```
+
+---
+
+## Stale-data detection
+
+An open socket is not proof of live data. `StalenessMonitor` watches every subscribed stream:
+
+| Condition | Meaning |
+|-----------|---------|
+| silence > `stale_after_seconds` | nothing received (stuck stream, silent proxy, exchange incident) |
+| receipt time − exchange `event_time` > `max_event_lag_seconds` | data arrives but late (backlog) |
+
+Only transitions are emitted, as `ConnectionEvent`s of type `stale` and `fresh`, so a consumer can
+stop trading on `stale` and resume on `fresh`. With `reconnect_on_stale` a silent socket is closed
+and reconnected with the usual backoff; `feed.health()` and `--status-file` expose per-stream
+silence, lag and message counts (the file is rewritten atomically every second).
+
+```bash
+websocket-feed-handler --symbols BTCUSDT --stale-after-seconds 15 --max-event-lag-seconds 5 \
+  --status-file data/live/feed_status.json
+```
+
+The CLI enables detection by default (15 s / 5 s); the library leaves it off unless
+`FeedConfig(staleness=StalenessPolicy(...))` is given. v0.2.0 also fixes a crash: after a
+cleanly closed session the backoff was computed for attempt 0 and raised instead of reconnecting.
+
+---
+
 ## Architecture
 
 ```text
@@ -131,6 +194,38 @@ Example JSONL compatible with `market-data-lakehouse`:
   "event_time": "2024-01-01T12:00:01Z"
 }
 ```
+
+---
+
+## Optional Rust accelerator (v0.2.0)
+
+`websocket_feed_handler.fast.parse_depth_raw` / `parse_trade_raw` parse raw Binance messages
+(combined-stream envelopes included) into tuples; the Rust version uses `serde_json`.
+
+`rust/` holds a PyO3 extension built with maturin. It is **optional**: without it the package
+uses the pure-Python implementation of the same functions (`fast.py`), and
+`QUANT_DISABLE_RUST=1` forces Python even when it is installed.
+
+- **Identical results**: both implementations accept the same grammar (decimal strings
+  `^\d{1,15}(\.\d{1,12})?$`, 64-bit integer ids) and fail the same way. Hypothesis property tests
+  (`tests/test_fast_parity.py`) feed both random valid and malformed inputs and require the same
+  output or the same `ValueError`, and compare them with the original `Decimal` implementation.
+- **Strings end to end**: decimal fields stay as the exchange's text until the caller needs a
+  `Decimal`, which is where most of the Python time went.
+- **Wheels**: `.github/workflows/wheels.yml` builds abi3 wheels (Python ≥ 3.11) for Linux x86_64
+  (manylinux) and macOS arm64, smoke-tests each one against the Python fallback and uploads them
+  as artifacts. `ci.yml` runs the whole suite with and without the accelerator, plus
+  `cargo fmt`, `clippy -D warnings` and `cargo test`.
+
+```bash
+pip install ./rust            # needs a Rust toolchain; or install a wheel from the CI artifacts
+python -c "import websocket_feed_handler.fast as f; print(f.BACKEND)"   # rust | python
+```
+
+Measured end to end in quant-terminal-web (`scripts/latency_bench.py`, 25,589 recorded BTCUSDT
+depth diffs, 2026-11-17, 4-vCPU Linux x86_64 container, Python 3.12): tick-to-decision p50
+131 µs → 15.5 µs and p99 3.70 ms → 166 µs versus the v0.1 Decimal path, with the same decision
+on every message.
 
 ---
 

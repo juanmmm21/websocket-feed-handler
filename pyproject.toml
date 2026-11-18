@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "websocket-feed-handler"
-version = "0.1.0"
+version = "0.2.0"
 description = "Cliente WebSocket de alta velocidad con reconexión automática para feeds de exchanges."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -29,11 +29,19 @@ dev = [
     "mypy>=1.8",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "hypothesis>=6.100",
     "ruff>=0.4",
+]
+
+rust = [
+    "websocket-feed-handler-rs @ git+https://github.com/juanmmm21/websocket-feed-handler@v0.2.0#subdirectory=rust",
 ]
 
 [project.scripts]
 websocket-feed-handler = "websocket_feed_handler.__main__:main"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/websocket_feed_handler"]
@@ -50,6 +58,10 @@ python_version = "3.11"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = ["websocket_feed_handler_rs"]
+ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 100
