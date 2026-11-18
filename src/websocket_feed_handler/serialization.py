@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import json
 import os
+from decimal import Decimal
 from pathlib import Path
 from typing import IO, Any
 
 from websocket_feed_handler.models import DepthDiffEvent, TradeEvent
+
+
+def _plain(value: Decimal) -> str:
+    """Fixed-point text: str(Decimal("0.00000000")) would give "0E-8", not what Binance sent."""
+    return format(value, "f")
 
 
 def trade_to_record(trade: TradeEvent) -> dict[str, Any]:
@@ -16,8 +22,8 @@ def trade_to_record(trade: TradeEvent) -> dict[str, Any]:
         "exchange": trade.exchange.value,
         "symbol": trade.symbol,
         "trade_id": trade.trade_id,
-        "price": str(trade.price),
-        "quantity": str(trade.quantity),
+        "price": _plain(trade.price),
+        "quantity": _plain(trade.quantity),
         "side": trade.side.value,
         "event_time": trade.event_time.isoformat(),
     }
@@ -30,8 +36,8 @@ def depth_diff_to_record(event: DepthDiffEvent) -> dict[str, Any]:
         "symbol": event.symbol,
         "first_update_id": event.first_update_id,
         "final_update_id": event.final_update_id,
-        "bids": [[str(price), str(quantity)] for price, quantity in event.bids],
-        "asks": [[str(price), str(quantity)] for price, quantity in event.asks],
+        "bids": [[_plain(price), _plain(quantity)] for price, quantity in event.bids],
+        "asks": [[_plain(price), _plain(quantity)] for price, quantity in event.asks],
         "event_time": event.event_time.isoformat(),
         "received_at": event.received_at.isoformat(),
     }

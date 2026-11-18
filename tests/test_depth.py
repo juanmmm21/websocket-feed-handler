@@ -51,6 +51,9 @@ def test_depth_parser_normalizes_diff() -> None:
     record = depth_diff_to_record(event)
     assert record["type"] == "depth_diff"
     assert record["bids"][1] == ["0.0023", "0"]
+    zero = BinanceDepthDiffParser().parse({**DEPTH_UPDATE, "b": [["65000.10", "0.00000000"]]})
+    assert zero is not None
+    assert depth_diff_to_record(zero)["bids"] == [["65000.10", "0.00000000"]]  # not "0E-8"
 
 
 def test_depth_parser_rejects_malformed_and_ignores_others() -> None:
