@@ -197,6 +197,38 @@ Example JSONL compatible with `market-data-lakehouse`:
 
 ---
 
+## Optional Rust accelerator (v0.2.0)
+
+`websocket_feed_handler.fast.parse_depth_raw` / `parse_trade_raw` parse raw Binance messages
+(combined-stream envelopes included) into tuples; the Rust version uses `serde_json`.
+
+`rust/` holds a PyO3 extension built with maturin. It is **optional**: without it the package
+uses the pure-Python implementation of the same functions (`fast.py`), and
+`QUANT_DISABLE_RUST=1` forces Python even when it is installed.
+
+- **Identical results**: both implementations accept the same grammar (decimal strings
+  `^\d{1,15}(\.\d{1,12})?$`, 64-bit integer ids) and fail the same way. Hypothesis property tests
+  (`tests/test_fast_parity.py`) feed both random valid and malformed inputs and require the same
+  output or the same `ValueError`, and compare them with the original `Decimal` implementation.
+- **Strings end to end**: decimal fields stay as the exchange's text until the caller needs a
+  `Decimal`, which is where most of the Python time went.
+- **Wheels**: `.github/workflows/wheels.yml` builds abi3 wheels (Python ≥ 3.11) for Linux x86_64
+  (manylinux) and macOS arm64, smoke-tests each one against the Python fallback and uploads them
+  as artifacts. `ci.yml` runs the whole suite with and without the accelerator, plus
+  `cargo fmt`, `clippy -D warnings` and `cargo test`.
+
+```bash
+pip install ./rust            # needs a Rust toolchain; or install a wheel from the CI artifacts
+python -c "import websocket_feed_handler.fast as f; print(f.BACKEND)"   # rust | python
+```
+
+Measured end to end in quant-terminal-web (`scripts/latency_bench.py`, 25,589 recorded BTCUSDT
+depth diffs, 2026-11-17, 4-vCPU Linux x86_64 container, Python 3.12): tick-to-decision p50
+131 µs → 15.5 µs and p99 3.70 ms → 166 µs versus the v0.1 Decimal path, with the same decision
+on every message.
+
+---
+
 ## Requirements
 
 - Python **3.11+**
