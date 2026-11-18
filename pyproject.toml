@@ -34,7 +34,7 @@ dev = [
 ]
 
 rust = [
-    "websocket-feed-handler-rs @ git+https://github.com/juanmmm21/websocket-feed-handler@feat/quant-roadmap#subdirectory=rust",
+    "websocket-feed-handler-rs @ git+https://github.com/juanmmm21/websocket-feed-handler@v0.2.0#subdirectory=rust",
 ]
 
 [project.scripts]
